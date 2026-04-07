@@ -1,0 +1,26 @@
+{
+  "name": "securescan-scanner",
+  "version": "1.1.0",
+  "description": "SecureScan Scanner Worker — Puppeteer-based security scanner",
+  "main": "dist/worker.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/worker.js",
+    "dev": "tsx watch src/worker.ts",
+    "arch:check": "depcruise --config .dependency-cruiser.cjs src"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.49.4",
+    "dotenv": "^17.3.1",
+    "puppeteer": "^24.6.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.14.0",
+    "dependency-cruiser": "^17.3.10",
+    "tsx": "^4.19.3",
+    "typescript": "^5.8.3"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}
