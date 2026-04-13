@@ -4,7 +4,7 @@ import { createClient } from '@supabase/supabase-js';
 const supabase = createClient(process.env.SUPABASE_URL!, process.env.SUPABASE_ANON_KEY!);
 
 async function main() {
-  await supabase.auth.signInWithPassword({ email: 'jose.santos@viverdeia.ai', password: 'Via@2026' });
+  await supabase.auth.signInWithPassword({ email: 'teste@viverdeia.ai', password: 'TESTE123' });
 
   const { data: scans } = await supabase.from('scans')
     .select('id, url, score')
