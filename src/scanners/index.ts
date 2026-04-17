@@ -78,30 +78,104 @@ async function deepScanRoute(
       return findings;
     }
 
-    // Wait for SPA to render
-    await new Promise(r => setTimeout(r, 1500));
+    // Wait for SPA to render — SPAs need time for auth guards to check session
+    // and conditionally render login screens. 2.5s covers most Supabase getSession() calls.
+    await new Promise(r => setTimeout(r, 2500));
 
-    // Check if we got redirected to login (means this route is protected — good!)
+    // ── Detection Layer 1: URL-based redirect ──
     const currentUrl = deepPage.url();
     const redirectedToAuth = currentUrl.includes('/auth') || currentUrl.includes('/login') || currentUrl.includes('/signin');
 
     if (redirectedToAuth) {
-      console.log(`  [deep-scan] ✅ Rota "${route.path}" requer autenticação (protegida)`);
-    } else if (route.sensitivity >= 80) {
-      // High sensitivity route did NOT redirect to auth — potential issue
-      // Check what content is on the page
-      const pageContent = await deepPage.evaluate(() => {
-        return {
-          bodyText: document.body?.innerText?.substring(0, 500) || '',
-          hasPasswordField: document.querySelectorAll('input[type="password"]').length > 0,
-          hasForms: document.querySelectorAll('form').length,
-          hasTables: document.querySelectorAll('table').length,
-          tableRows: Array.from(document.querySelectorAll('table')).reduce((sum, t) => sum + t.querySelectorAll('tr').length, 0),
-          title: document.title,
-        };
-      });
+      console.log(`  [deep-scan] ✅ Rota "${route.path}" requer autenticação (redirect para auth)`);
+      return findings; // Protected — no findings
+    }
 
-      // If the page has actual content (not just a "404" or blank page), it's concerning
+    // ── Detection Layer 2: DOM-based login screen detection ──
+    // SPAs (Lovable, Vercel, etc.) often render login forms at the SAME URL
+    // without any URL redirect. We detect this by inspecting the rendered DOM.
+    const pageContent = await deepPage.evaluate(() => {
+      const bodyText = document.body?.innerText?.substring(0, 1500) || '';
+      const bodyTextLower = bodyText.toLowerCase();
+
+      // Check for password input fields (strongest signal of a login screen)
+      const hasPasswordField = document.querySelectorAll('input[type="password"]').length > 0;
+
+      // Check for email/username input fields commonly found in login forms
+      const hasEmailField = document.querySelectorAll(
+        'input[type="email"], input[name*="email"], input[placeholder*="email"], input[placeholder*="Email"]'
+      ).length > 0;
+
+      // Check for login-related text patterns (EN + PT-BR)
+      const loginTextPatterns = [
+        // Portuguese
+        'entrar', 'entre com', 'fazer login', 'faça login', 'iniciar sessão',
+        'credenciais', 'autenticação', 'autenticar', 'digite sua senha',
+        'esqueceu a senha', 'esqueceu sua senha', 'redefinir senha',
+        'não tem uma conta', 'crie sua conta', 'cadastre-se',
+        // English
+        'sign in', 'log in', 'login', 'enter your password', 'enter your email',
+        'forgot password', 'forgot your password', 'don\'t have an account',
+        'create an account', 'sign up',
+      ];
+      const hasLoginText = loginTextPatterns.some(pattern => bodyTextLower.includes(pattern));
+
+      // Check for Supabase Auth UI components (common in Lovable apps)
+      const hasSupabaseAuthUI = document.querySelectorAll(
+        '[class*="supabase-auth"], [class*="auth-ui"], [data-supabase-auth]'
+      ).length > 0;
+
+      // Check for auth-related form elements
+      const formLabels = Array.from(document.querySelectorAll('label'))
+        .map(l => l.textContent?.toLowerCase() || '');
+      const hasAuthLabels = formLabels.some(label =>
+        label.includes('email') || label.includes('senha') || label.includes('password') ||
+        label.includes('usuário') || label.includes('username')
+      );
+
+      // Check for login/auth button text
+      const buttonTexts = Array.from(document.querySelectorAll('button, [role="button"], input[type="submit"]'))
+        .map(b => b.textContent?.toLowerCase().trim() || '');
+      const hasAuthButtons = buttonTexts.some(text =>
+        text.includes('entrar') || text.includes('login') || text.includes('sign in') ||
+        text.includes('log in') || text.includes('acessar') || text.includes('continuar')
+      );
+
+      return {
+        bodyText: bodyText.substring(0, 500),
+        hasPasswordField,
+        hasEmailField,
+        hasLoginText,
+        hasSupabaseAuthUI,
+        hasAuthLabels,
+        hasAuthButtons,
+        hasForms: document.querySelectorAll('form').length,
+        hasTables: document.querySelectorAll('table').length,
+        tableRows: Array.from(document.querySelectorAll('table')).reduce((sum, t) => sum + t.querySelectorAll('tr').length, 0),
+        title: document.title,
+      };
+    });
+
+    // A page is considered a login screen if it has strong auth signals.
+    // Password field is the strongest single signal; combinations of weaker signals also count.
+    const authSignalScore =
+      (pageContent.hasPasswordField ? 3 : 0) +
+      (pageContent.hasEmailField ? 1 : 0) +
+      (pageContent.hasLoginText ? 2 : 0) +
+      (pageContent.hasSupabaseAuthUI ? 3 : 0) +
+      (pageContent.hasAuthLabels ? 1 : 0) +
+      (pageContent.hasAuthButtons ? 2 : 0);
+
+    // Threshold: password field alone (3) or combination of 2+ weaker signals (score >= 3)
+    const isLoginScreen = authSignalScore >= 3;
+
+    if (isLoginScreen) {
+      console.log(`  [deep-scan] ✅ Rota "${route.path}" requer autenticação (tela de login detectada no DOM, score=${authSignalScore})`);
+      return findings; // Protected — no findings
+    }
+
+    // ── Route is NOT protected: evaluate if it's actually exposing real content ──
+    if (route.sensitivity >= 80) {
       const hasRealContent = pageContent.bodyText.length > 50 && 
         !pageContent.bodyText.includes('404') && 
         !pageContent.bodyText.includes('Not Found');
