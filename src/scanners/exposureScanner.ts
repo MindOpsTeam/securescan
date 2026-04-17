@@ -19,7 +19,12 @@ const SENSITIVE_PATHS: readonly ExposureCheck[] = [
     path: '/.env',
     severity: 'CRITICAL',
     title: 'Arquivo .env exposto publicamente',
-    contentCheck: (body) => body.includes('=') && !body.includes('<html'),
+    contentCheck: (body) => {
+      // Must have at least 2 KEY=VALUE lines and no HTML tags (SPA catch-all guard)
+      if (/<(div|script|meta|html|head|body|link|style)/i.test(body)) return false;
+      const kvLines = body.split('\n').filter(l => /^[A-Z_][A-Z0-9_]*\s*=/.test(l.trim()));
+      return kvLines.length >= 2;
+    },
     remediation: 'Bloqueie o acesso a /.env no servidor/CDN. Rotacione TODAS as credenciais expostas.',
     aiPrompt:
       'URGENTE: O arquivo .env está acessível publicamente. Este arquivo contém credenciais sensíveis. ' +
@@ -30,7 +35,11 @@ const SENSITIVE_PATHS: readonly ExposureCheck[] = [
     path: '/.env.local',
     severity: 'CRITICAL',
     title: 'Arquivo .env.local exposto publicamente',
-    contentCheck: (body) => body.includes('=') && !body.includes('<html'),
+    contentCheck: (body) => {
+      if (/<(div|script|meta|html|head|body|link|style)/i.test(body)) return false;
+      const kvLines = body.split('\n').filter(l => /^[A-Z_][A-Z0-9_]*\s*=/.test(l.trim()));
+      return kvLines.length >= 2;
+    },
     remediation: 'Bloqueie o acesso a arquivos .env no servidor/CDN.',
     aiPrompt: 'O arquivo .env.local está acessível publicamente. Rotacione todas as credenciais e bloqueie o acesso.',
   },

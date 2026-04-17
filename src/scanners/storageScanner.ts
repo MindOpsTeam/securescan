@@ -24,20 +24,51 @@ export async function scanStorage(page: Page, url: string): Promise<Finding[]> {
     return { lsKeys, ssKeys, lsItems, ssItems };
   });
 
-  const sensitivePatterns = [
+  const sensitiveKeyPatterns = [
     { pattern: /token|jwt|auth|session|password|secret|key|credential/i, severity: 'HIGH' as const },
     { pattern: /credit.?card|ssn|social.?sec/i, severity: 'CRITICAL' as const },
   ];
 
+  // Values that are common config strings, not real secrets
+  const BENIGN_VALUE_RE = /^(google|facebook|github|apple|twitter|email|phone|sms|true|false|enabled|disabled|light|dark|en|pt|es|fr|de|null|undefined|none|pkce|implicit|magiclink)$/i;
+
+  // Supabase SDK managed auth keys — stored in localStorage for SSR but managed by SDK
+  const SUPABASE_AUTH_KEY_RE = /^sb-[a-z0-9]+-auth-token$/;
+
+  /**
+   * Check if a value looks like a real secret (high entropy, long, or JWT format)
+   * rather than a config label or short identifier.
+   */
+  function looksLikeRealSecret(value: string): boolean {
+    if (value.length < 20) return false;
+    if (/^eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/.test(value)) return true; // JWT
+    // Shannon entropy check
+    const freq: Record<string, number> = {};
+    for (const c of value) freq[c] = (freq[c] || 0) + 1;
+    const len = value.length;
+    const entropy = -Object.values(freq).reduce((sum, f) => {
+      const p = f / len;
+      return sum + p * Math.log2(p);
+    }, 0);
+    return entropy >= 3.5;
+  }
+
   for (const key of storageData.lsKeys) {
     // Ignora chaves de marketing comuns, chaves com ":" (plugins) e analytics sessions
-    const isIgnoredKey = /^(_ga|_fbp|_hjid|amp_|mixpanel_|intercom_|eng_|optimizely|rdstation|hubspot)/i.test(key) || 
-                         key.includes(':') || 
+    const isIgnoredKey = /^(_ga|_fbp|_hjid|amp_|mixpanel_|intercom_|eng_|optimizely|rdstation|hubspot)/i.test(key) ||
+                         key.includes(':') ||
                          /session.?data|tracking/i.test(key);
     if (isIgnoredKey) continue;
 
-    for (const sp of sensitivePatterns) {
-      if (sp.pattern.test(key) || sp.pattern.test(storageData.lsItems[key] || '')) {
+    // Skip Supabase SDK managed auth tokens (handled by the SDK itself)
+    if (SUPABASE_AUTH_KEY_RE.test(key)) continue;
+
+    const value = storageData.lsItems[key] || '';
+    let matched = false;
+
+    // First: check if the KEY name matches a sensitive pattern
+    for (const sp of sensitiveKeyPatterns) {
+      if (sp.pattern.test(key)) {
         findings.push({
           type: 'insecure_storage',
           severity: sp.severity,
@@ -46,7 +77,7 @@ export async function scanStorage(page: Page, url: string): Promise<Finding[]> {
           location: url,
           remediation: 'Migre tokens de autenticação para cookies HttpOnly ao invés de localStorage.',
           metadata: {
-            storage: 'localStorage', key, preview: storageData.lsItems[key]?.substring(0, 50),
+            storage: 'localStorage', key, preview: value.substring(0, 50),
             ai_prompt:
               `A chave "${key}" está sendo armazenada no localStorage, que é acessível por qualquer JavaScript na página (incluindo XSS). ` +
               'Migre tokens de autenticação para cookies HttpOnly. Se usando Supabase, configure o storage adapter para usar cookies: ' +
@@ -54,7 +85,31 @@ export async function scanStorage(page: Page, url: string): Promise<Finding[]> {
               'Se for um framework como Next.js, use @supabase/ssr para gerenciar a sessão via cookies automaticamente.',
           },
         });
+        matched = true;
         break;
+      }
+    }
+
+    // Only check VALUE if key didn't match (avoid double-reporting)
+    if (!matched && !BENIGN_VALUE_RE.test(value) && looksLikeRealSecret(value)) {
+      for (const sp of sensitiveKeyPatterns) {
+        if (sp.pattern.test(value)) {
+          findings.push({
+            type: 'insecure_storage',
+            severity: sp.severity,
+            title: `Dados sensíveis no localStorage: "${key}"`,
+            description: `Encontrados dados potencialmente sensíveis armazenados no localStorage na chave "${key}".`,
+            location: url,
+            remediation: 'Migre tokens de autenticação para cookies HttpOnly ao invés de localStorage.',
+            metadata: {
+              storage: 'localStorage', key, preview: value.substring(0, 50),
+              ai_prompt:
+                `A chave "${key}" está sendo armazenada no localStorage, que é acessível por qualquer JavaScript na página (incluindo XSS). ` +
+                'Migre tokens de autenticação para cookies HttpOnly.',
+            },
+          });
+          break;
+        }
       }
     }
   }

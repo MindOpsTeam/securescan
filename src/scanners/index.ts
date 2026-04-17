@@ -264,11 +264,12 @@ export async function runAllScanners(
     }
   }
 
-  // ── Dedup findings by title ──
-  const seenTitles = new Set<string>();
+  // ── Dedup findings by type + title + location ──
+  const seenKeys = new Set<string>();
   const dedupedFindings = allFindings.filter(f => {
-    if (seenTitles.has(f.title)) return false;
-    seenTitles.add(f.title);
+    const key = `${f.type}::${f.title}::${f.location || ''}`;
+    if (seenKeys.has(key)) return false;
+    seenKeys.add(key);
     return true;
   });
 

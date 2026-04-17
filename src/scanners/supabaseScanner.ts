@@ -286,25 +286,65 @@ async function extractFromSourceCode(page: Page, scriptContents: string[] = []):
 
 // ────────────────── Phase 3: Table Probing ──────────────────
 
-// Tabelas comuns em apps Supabase / vibe-coded
-const COMMON_TABLES = [
-  // Auth-adjacent
-  'users', 'profiles', 'accounts', 'user_profiles', 'user_settings',
-  // Business data
-  'posts', 'comments', 'messages', 'notifications', 'orders',
-  'products', 'items', 'categories', 'tags',
-  'projects', 'tasks', 'documents', 'files',
-  // Payment
-  'payments', 'subscriptions', 'invoices', 'plans',
-  // App-specific
-  'scans', 'findings', 'reports', 'logs', 'events', 'analytics',
-  'teams', 'organizations', 'members', 'invitations', 'roles',
-  'settings', 'configurations', 'secrets',
-  // Content
-  'articles', 'pages', 'media', 'uploads', 'attachments',
-  // Chat
-  'conversations', 'chat_messages', 'channels',
+// Tabelas comuns em apps Supabase / vibe-coded, classificadas por sensibilidade
+type TableSensitivity = 'high' | 'medium' | 'low';
+
+interface TableEntry {
+  name: string;
+  sensitivity: TableSensitivity;
+}
+
+const CLASSIFIED_TABLES: readonly TableEntry[] = [
+  // HIGH — auth, PII, payment, credentials
+  { name: 'users', sensitivity: 'high' },
+  { name: 'profiles', sensitivity: 'high' },
+  { name: 'accounts', sensitivity: 'high' },
+  { name: 'user_profiles', sensitivity: 'high' },
+  { name: 'user_settings', sensitivity: 'high' },
+  { name: 'payments', sensitivity: 'high' },
+  { name: 'subscriptions', sensitivity: 'high' },
+  { name: 'invoices', sensitivity: 'high' },
+  { name: 'secrets', sensitivity: 'high' },
+
+  // MEDIUM — business data, internal comms, org management
+  { name: 'orders', sensitivity: 'medium' },
+  { name: 'messages', sensitivity: 'medium' },
+  { name: 'notifications', sensitivity: 'medium' },
+  { name: 'documents', sensitivity: 'medium' },
+  { name: 'teams', sensitivity: 'medium' },
+  { name: 'organizations', sensitivity: 'medium' },
+  { name: 'members', sensitivity: 'medium' },
+  { name: 'settings', sensitivity: 'medium' },
+  { name: 'roles', sensitivity: 'medium' },
+  { name: 'invitations', sensitivity: 'medium' },
+  { name: 'files', sensitivity: 'medium' },
+
+  // LOW — public content, generic app data
+  { name: 'posts', sensitivity: 'low' },
+  { name: 'comments', sensitivity: 'low' },
+  { name: 'articles', sensitivity: 'low' },
+  { name: 'pages', sensitivity: 'low' },
+  { name: 'media', sensitivity: 'low' },
+  { name: 'tags', sensitivity: 'low' },
+  { name: 'categories', sensitivity: 'low' },
+  { name: 'items', sensitivity: 'low' },
+  { name: 'products', sensitivity: 'low' },
+  { name: 'uploads', sensitivity: 'low' },
+  { name: 'attachments', sensitivity: 'low' },
+  { name: 'conversations', sensitivity: 'low' },
+  { name: 'channels', sensitivity: 'low' },
+  { name: 'chat_messages', sensitivity: 'low' },
+  { name: 'projects', sensitivity: 'low' },
+  { name: 'tasks', sensitivity: 'low' },
+  { name: 'plans', sensitivity: 'low' },
 ];
+
+const COMMON_TABLES = CLASSIFIED_TABLES.map(t => t.name);
+
+/** Lookup map for table sensitivity tier. Defaults to 'medium' for schema-discovered tables. */
+const TABLE_SENSITIVITY_MAP = new Map<string, TableSensitivity>(
+  CLASSIFIED_TABLES.map(t => [t.name, t.sensitivity]),
+);
 
 // Helper: fetch com timeout de 3 segundos
 function fetchWithTimeout(url: string, opts: RequestInit, timeoutMs = 3000): Promise<Response> {
@@ -405,6 +445,12 @@ async function probeSingleTable(
     probe.delete.allowed = true;
   }
 
+  // Skip tables where SELECT returns 0 rows and no write access — RLS is working
+  if (probe.select.allowed && probe.select.rowCount === 0 &&
+      !probe.insert.allowed && !probe.update.allowed && !probe.delete.allowed) {
+    return null;
+  }
+
   // Only report accessible tables
   if (probe.select.allowed || probe.insert.allowed || probe.update.allowed || probe.delete.allowed) {
     return probe;
@@ -489,18 +535,26 @@ function analyzeJWT(token: string): JWTInfo | null {
 // ────────────────── Phase 5: Finding Builders (Domain Logic) ──────────────────
 
 /**
- * Determina a severidade de uma tabela exposta baseado nas operações permitidas.
+ * Determina a severidade de uma tabela exposta baseado nas operações permitidas
+ * e no tier de sensibilidade da tabela.
  * Função pura de regra de negócio — sem side effects.
  */
 function determineSeverity(probe: TableProbeResult): Severity {
-  const isSensitiveTable = /user|profile|secret|password|token|session|payment|order|invoice|credential/i
-    .test(probe.table);
+  const tier = TABLE_SENSITIVITY_MAP.get(probe.table) || 'medium';
 
+  // Write access is always critical regardless of tier
   if (probe.insert.allowed || probe.delete.allowed) return 'CRITICAL';
   if (probe.update.allowed) return 'HIGH';
-  if (probe.select.allowed && isSensitiveTable && probe.select.rowCount > 0) return 'HIGH';
-  if (probe.select.allowed && probe.select.rowCount > 0) return 'MEDIUM';
-  // SELECT allowed but 0 rows → likely RLS is active and filtering (informational)
+
+  // SELECT-only: severity depends on tier and row count
+  if (probe.select.allowed && probe.select.rowCount > 0) {
+    if (tier === 'high') return 'HIGH';
+    if (tier === 'medium') return 'LOW';
+    // tier === 'low': public content tables with read-only access — informational
+    return 'INFO';
+  }
+
+  // SELECT allowed but 0 rows → RLS is active and filtering
   if (probe.select.allowed && probe.select.rowCount === 0) return 'INFO';
   if (probe.select.allowed) return 'LOW';
   return 'MEDIUM';

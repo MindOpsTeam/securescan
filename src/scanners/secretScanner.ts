@@ -5,6 +5,19 @@ interface SecretPatternWithPrompt extends SecretPattern {
   aiPrompt: string;
 }
 
+/**
+ * Shannon entropy — low entropy values (< 3.0) are likely placeholders, not real secrets.
+ */
+function shannonEntropy(str: string): number {
+  const freq: Record<string, number> = {};
+  for (const c of str) freq[c] = (freq[c] || 0) + 1;
+  const len = str.length;
+  return -Object.values(freq).reduce((sum, f) => {
+    const p = f / len;
+    return sum + p * Math.log2(p);
+  }, 0);
+}
+
 const SECRET_PATTERNS: readonly SecretPatternWithPrompt[] = [
   {
     name: 'AWS_ACCESS_KEY', regex: /AKIA[0-9A-Z]{16}/g, severity: 'CRITICAL',
@@ -34,7 +47,7 @@ const SECRET_PATTERNS: readonly SecretPatternWithPrompt[] = [
       'Se a chave é usada para serviços sensíveis (Gemini, Cloud Functions), mova para o backend.',
   },
   {
-    name: 'FIREBASE_CONFIG', regex: /firebase[A-Za-z]*\.initializeApp\s*\(\s*\{[^}]*apiKey\s*:\s*['"]([^'"]+)['"]/gi, severity: 'MEDIUM',
+    name: 'FIREBASE_CONFIG', regex: /firebase[A-Za-z]*\.initializeApp\s*\(\s*\{[^}]*apiKey\s*:\s*['"]([^'"]+)['"]/gi, severity: 'INFO',
     remediation: 'Chaves Firebase são públicas por design, mas garanta as regras de segurança.',
     aiPrompt:
       'A configuração do Firebase (apiKey) foi encontrada no frontend. Isso é normal e esperado. ' +
@@ -176,6 +189,13 @@ export async function scanSecrets(page: Page, url: string): Promise<Finding[]> {
           matchContext.substring(0, matchContext.indexOf(match[0]))
         )) continue;
 
+        // Skip matches inside HTML comments (<!-- ... -->) or JS comments (// ..., /* ... */)
+        const precedingContext = fullContent.substring(
+          Math.max(0, (match.index ?? 0) - 200),
+          match.index ?? 0,
+        );
+        if (/<!--[^>]*$/.test(precedingContext) || /\/\/[^\n]*$/.test(precedingContext) || /\/\*[^*]*$/.test(precedingContext)) continue;
+
         // Skip common UI/label strings
         if (/^(password|token|secret|confirm_password|new_password|old_password|current_password|reset_password|forgot_password)$/i.test(value)) continue;
 
@@ -185,6 +205,19 @@ export async function scanSecrets(page: Page, url: string): Promise<Finding[]> {
 
         // Skip common Supabase/Firebase public key names
         if (/^(supabase_url|supabase_key|supabase_anon|publishable_key|public_key|anon_key)$/i.test(value)) continue;
+
+        // Skip common placeholder/dummy values
+        if (/^(changeme|your[_-]?api[_-]?key|your[_-]?secret|xxx+|TODO|REPLACE_ME|INSERT_HERE|CHANGE_THIS|sk_test_|pk_test_)/i.test(value)) continue;
+        if (/example|sample|dummy|default|placeholder|template|mock|fake|lorem/i.test(value)) continue;
+
+        // Skip low-entropy values (likely slugs, identifiers, or placeholders — not real secrets)
+        if (shannonEntropy(value) < 3.0) continue;
+
+        // Skip values that are pure lowercase-and-hyphens slugs (e.g., "my-secret-value")
+        if (/^[a-z][a-z0-9-]+$/.test(value)) continue;
+
+        // Skip pure camelCase/snake_case identifiers without special chars (e.g., "mySecretVariable")
+        if (/^[a-zA-Z][a-zA-Z0-9_]+$/.test(value) && !/[A-Z].*[a-z].*[0-9]/.test(value)) continue;
       }
 
       findings.push({
